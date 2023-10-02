@@ -49,5 +49,5 @@ exec geth \
 	--metrics \
 	--metrics.addr=0.0.0.0 \
 	--metrics.port=6060 \
-	--rollup.l1archivenoderpc="http://127.0.0.1:8545" \
+	--rollup.l1archivenoderpc="http://l1:8545" \
 	"$@"
