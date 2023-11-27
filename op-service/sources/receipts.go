@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-service/client"
@@ -26,16 +27,40 @@ type ReceiptsProvider interface {
 	FetchReceipts(ctx context.Context, block eth.BlockID, txHashes []common.Hash) (types.Receipts, error)
 }
 
+// A CachingReceiptsProvider caches successful receipt fetches from the inner
+// ReceiptsProvider. It also avoids duplicate in-flight requests per block hash.
 type CachingReceiptsProvider struct {
 	inner ReceiptsProvider
 	cache *caching.LRUCache[common.Hash, types.Receipts]
+
+	// lock fetching process for each block hash to avoid duplicate requests
+	fetching   map[common.Hash]*sync.Mutex
+	fetchingMu sync.Mutex // only protects map
 }
 
 func NewCachingReceiptsProvider(inner ReceiptsProvider, m caching.Metrics, cacheSize int) *CachingReceiptsProvider {
 	return &CachingReceiptsProvider{
-		inner: inner,
-		cache: caching.NewLRUCache[common.Hash, types.Receipts](m, "receipts", cacheSize),
+		inner:    inner,
+		cache:    caching.NewLRUCache[common.Hash, types.Receipts](m, "receipts", cacheSize),
+		fetching: make(map[common.Hash]*sync.Mutex),
 	}
+}
+
+func (p *CachingReceiptsProvider) getOrCreateFetchingLock(blockHash common.Hash) *sync.Mutex {
+	p.fetchingMu.Lock()
+	defer p.fetchingMu.Unlock()
+	if mu, ok := p.fetching[blockHash]; ok {
+		return mu
+	}
+	mu := new(sync.Mutex)
+	p.fetching[blockHash] = mu
+	return mu
+}
+
+func (p *CachingReceiptsProvider) deleteFetchingLock(blockHash common.Hash) {
+	p.fetchingMu.Lock()
+	defer p.fetchingMu.Unlock()
+	delete(p.fetching, blockHash)
 }
 
 func (p *CachingReceiptsProvider) FetchReceipts(ctx context.Context, block eth.BlockID, txHashes []common.Hash) (types.Receipts, error) {
@@ -43,19 +68,25 @@ func (p *CachingReceiptsProvider) FetchReceipts(ctx context.Context, block eth.B
 		return r, nil
 	}
 
+	mu := p.getOrCreateFetchingLock(block.Hash)
+	mu.Lock()
+	defer mu.Unlock()
+	// Other routine might have fetched in the meantime
+	if r, ok := p.cache.Get(block.Hash); ok {
+		// we might have created a new lock above while the old
+		// fetching job completed.
+		p.deleteFetchingLock(block.Hash)
+		return r, nil
+	}
+
 	r, err := p.inner.FetchReceipts(ctx, block, txHashes)
 	if err != nil {
 		return nil, err
 	}
-
 	p.cache.Add(block.Hash, r)
+	// result now in cache, can delete fetching lock
+	p.deleteFetchingLock(block.Hash)
 	return r, nil
-}
-
-// CachedReceipts provides direct access to the underlying receipts cache.
-// It returns the receipts and true for a cache hit, and nil, false otherwise.
-func (p *CachingReceiptsProvider) CachedReceipts(blockHash common.Hash) (types.Receipts, bool) {
-	return p.cache.Get(blockHash)
 }
 
 func newRPCRecProviderFromConfig(client client.RPC, log log.Logger, metrics caching.Metrics, config *EthClientConfig) *CachingReceiptsProvider {
@@ -72,33 +103,71 @@ type rpcClient interface {
 	BatchCallContext(ctx context.Context, b []rpc.BatchElem) error
 }
 
+type receiptsBatchCall = batching.IterativeBatchCall[common.Hash, *types.Receipt]
+
 type BasicRPCReceiptsFetcher struct {
 	client       rpcClient
 	maxBatchSize int
+
+	// calls caches uncompleted batch calls
+	calls   map[common.Hash]*receiptsBatchCall
+	callsMu sync.Mutex
+}
+
+func NewBasicRPCReceiptsFetcher(client rpcClient, maxBatchSize int) *BasicRPCReceiptsFetcher {
+	return &BasicRPCReceiptsFetcher{
+		client:       client,
+		maxBatchSize: maxBatchSize,
+		calls:        make(map[common.Hash]*receiptsBatchCall),
+	}
 }
 
 func (f *BasicRPCReceiptsFetcher) FetchReceipts(ctx context.Context, block eth.BlockID, txHashes []common.Hash) (types.Receipts, error) {
-	fetcher := batching.NewIterativeBatchCall[common.Hash, *types.Receipt](
+	call := f.getOrCreateBatchCall(block.Hash, txHashes)
+
+	// Fetch all receipts
+	for {
+		if err := call.Fetch(ctx); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	res, err := call.Result()
+	if err != nil {
+		return nil, err
+	}
+	// call successful, remove from cache
+	f.deleteBatchCall(block.Hash)
+	return res, nil
+}
+
+func (f *BasicRPCReceiptsFetcher) getOrCreateBatchCall(blockHash common.Hash, txHashes []common.Hash) *receiptsBatchCall {
+	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
+	if call, ok := f.calls[blockHash]; ok {
+		return call
+	}
+	call := batching.NewIterativeBatchCall[common.Hash, *types.Receipt](
 		txHashes,
 		makeReceiptRequest,
 		f.client.BatchCallContext,
 		f.client.CallContext,
 		f.maxBatchSize,
 	)
-	// Fetch all receipts
-	for {
-		if err := fetcher.Fetch(ctx); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, err
-		}
-	}
-	return fetcher.Result()
+	f.calls[blockHash] = call
+	return call
+}
+
+func (f *BasicRPCReceiptsFetcher) deleteBatchCall(blockHash common.Hash) {
+	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
+	delete(f.calls, blockHash)
 }
 
 type RPCReceiptsFetcher struct {
 	client rpcClient
-	basic  BasicRPCReceiptsFetcher
+	basic  *BasicRPCReceiptsFetcher
 
 	log log.Logger
 
@@ -126,11 +195,8 @@ type RPCReceiptsConfig struct {
 
 func NewRPCReceiptsFetcher(client rpcClient, log log.Logger, config RPCReceiptsConfig) *RPCReceiptsFetcher {
 	return &RPCReceiptsFetcher{
-		client: client,
-		basic: BasicRPCReceiptsFetcher{
-			client:       client,
-			maxBatchSize: config.MaxBatchSize,
-		},
+		client:                  client,
+		basic:                   NewBasicRPCReceiptsFetcher(client, config.MaxBatchSize),
 		log:                     log,
 		provKind:                config.ProviderKind,
 		availableReceiptMethods: AvailableReceiptsFetchingMethods(config.ProviderKind),
