@@ -37,4 +37,3 @@
   "src/universal/OptimismMintableERC721.sol": "0x4c73bf8474fa7eb091796a4db7e57bc5f26d50a3d1cfcb78d5efa47ced5ced2b",
   "src/universal/OptimismMintableERC721Factory.sol": "0x935fd97018b6ef10fa813d9d43ab7a77c80885f7a8d7feb430097645cb2abd2c",
   "src/universal/StorageSetter.sol": "0x394ec39ef24b44f54549deec6183cace8eea2e5313cde8d5a6e0411a481c5953"
-}
