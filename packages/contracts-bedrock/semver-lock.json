@@ -25,6 +25,7 @@
   "src/dispute/DisputeGameFactory.sol": "0xfdfa141408d7f8de7e230ff4bef088e30d0e4d569ca743d60d292abdd21ff270",
   "src/dispute/FaultDisputeGame.sol": "0x7ac7553a47d96a4481a6b95363458bed5f160112b647829c4defc134fa178d9a",
   "src/dispute/OutputBisectionGame.sol": "0x16714c8660bf704d255ebb3fe08eb72caf4a890c43ea74fa1109df95194af760",
+  "src/interop/NewL2CrossDomainMessenger.sol": "0x61345aacebe0191dcc80e06c245eea21532fb51cf31f0cacbcf7802a0cb090ba",
   "src/legacy/DeployerWhitelist.sol": "0x0a6840074734c9d167321d3299be18ef911a415e4c471fa92af7d6cfaa8336d4",
   "src/legacy/L1BlockNumber.sol": "0x20d83a636c5e2067fca8c0ed505b295174e6eddb25960d8705e6b6fea8e77fa6",
   "src/legacy/LegacyMessagePasser.sol": "0x80f355c9710af586f58cf6a86d1925e0073d1e504d0b3d814284af1bafe4dece",
