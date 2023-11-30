@@ -1104,6 +1104,7 @@ contract Deploy is Deployer {
                     _gameType: _gameType,
                     _absolutePrestate: _absolutePrestate,
                     _genesisBlockNumber: cfg.outputBisectionGameGenesisBlock(),
+                    _genesisOutputRoot: Hash.wrap(cfg.outputBisectionGameGenesisOutputRoot()),
                     _maxGameDepth: _maxGameDepth,
                     _splitDepth: cfg.outputBisectionGameSplitDepth(),
                     _gameDuration: Duration.wrap(uint64(cfg.faultGameMaxDuration())),
